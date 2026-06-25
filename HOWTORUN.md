@@ -1,5 +1,17 @@
 # Dokumentation
 
+*OBS*
+## Felsökning
+
+Om du får 404-fel, kör:
+
+docker compose down -v
+docker compose up --build
+
+Detta rensar gamla volymer och bygger om alla tjänster från grunden.
+
+*OBS*
+
 ## Starta systemet
 
 Hela systemet startas med ett enda kommando:
