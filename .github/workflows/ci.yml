@@ -1,0 +1,166 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: fastfood_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      rabbitmq:
+        image: rabbitmq:3-alpine
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Initialize test database
+        run: psql -h localhost -U postgres -d fastfood_test -f db/init.sql
+        env:
+          PGPASSWORD: postgres
+
+      - name: Install shared dependencies
+        working-directory: services/shared
+        run: npm install
+
+      - name: Build shared
+        working-directory: services/shared
+        run: npm run build
+
+      - name: Install & test product-service
+        working-directory: services/product-service
+        run: |
+          npm install
+          npm test
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/fastfood_test
+          RABBITMQ_URL: amqp://guest:guest@localhost:5672
+
+      - name: Install & test order-service
+        working-directory: services/order-service
+        run: |
+          npm install
+          npm test
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/fastfood_test
+          RABBITMQ_URL: amqp://guest:guest@localhost:5672
+
+      - name: Install & test kitchen-service
+        working-directory: services/kitchen-service
+        run: |
+          npm install
+          npm test
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/fastfood_test
+          RABBITMQ_URL: amqp://guest:guest@localhost:5672
+
+      - name: Install & test notification-service
+        working-directory: services/notification-service
+        run: |
+          npm install
+          npm test
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/fastfood_test
+          RABBITMQ_URL: amqp://guest:guest@localhost:5672
+
+  e2e:
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start system
+        run: docker compose up -d --build --wait
+        timeout-minutes: 5
+
+      - name: Wait for services
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost/health > /dev/null 2>&1; then
+              echo "System is ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "System failed to start"
+          docker compose logs
+          exit 1
+
+      - name: Run E2E tests
+        run: |
+          # Get menu
+          echo "--- Fetching menu ---"
+          curl -sf http://localhost/api/menu | jq .
+
+          # Place an order
+          echo "--- Placing order ---"
+          ORDER=$(curl -sf -X POST http://localhost/api/orders \
+            -H "Content-Type: application/json" \
+            -d '{"customer_name":"CI Test","items":[{"product_id":1,"quantity":2},{"product_id":4,"quantity":1}]}')
+          echo "$ORDER" | jq .
+          ORDER_ID=$(echo "$ORDER" | jq -r '.id')
+
+          # Wait for kitchen to receive
+          sleep 2
+
+          # Check kitchen tickets
+          echo "--- Kitchen tickets ---"
+          curl -sf http://localhost/api/kitchen/tickets | jq .
+
+          # Update status to preparing
+          echo "--- Preparing order ---"
+          curl -sf -X PATCH "http://localhost/api/kitchen/tickets/$ORDER_ID" \
+            -H "Content-Type: application/json" \
+            -d '{"status":"preparing"}' | jq .
+
+          # Update status to ready
+          echo "--- Order ready ---"
+          curl -sf -X PATCH "http://localhost/api/kitchen/tickets/$ORDER_ID" \
+            -H "Content-Type: application/json" \
+            -d '{"status":"ready"}' | jq .
+
+          sleep 1
+
+          # Check notifications
+          echo "--- Notifications ---"
+          curl -sf "http://localhost/api/notifications/$ORDER_ID" | jq .
+
+          # Verify order status
+          echo "--- Final order status ---"
+          STATUS=$(curl -sf "http://localhost/api/orders/$ORDER_ID" | jq -r '.status')
+          echo "Order status: $STATUS"
+          if [ "$STATUS" != "ready" ]; then
+            echo "FAIL: Expected status 'ready' but got '$STATUS'"
+            exit 1
+          fi
+
+          echo "All E2E tests passed!"
+
+      - name: Cleanup
+        if: always()
+        run: docker compose down -v

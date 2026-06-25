@@ -1,0 +1,18 @@
+{
+  "name": "@fastfood/shared",
+  "version": "1.0.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "amqplib": "^0.10.4",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/amqplib": "^0.10.5",
+    "@types/pg": "^8.11.10",
+    "typescript": "^5.7.0"
+  }
+}
